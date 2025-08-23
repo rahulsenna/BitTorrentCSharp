@@ -1,0 +1,57 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "shell",
+            "label": "codecrafter test",
+            "command": "make",
+            "args": [
+                "test_csharp"
+            ],
+            "options": {
+                "cwd": "/Users/agentofchaos/dev/testers-codecrafters-io/bittorrent-tester"
+            },
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": "**/*.txt"
+            },
+            "presentation": {
+                "echo": true,
+                "focus": true,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": true
+            }
+        },
+        {
+            "type": "dotnet",
+            "task": "build",
+            "group": "build",
+            "problemMatcher": [],
+            "label": "dotnet: build"
+        },
+        {
+            "type": "dotnet",
+            "task": "watch CodeCrafters.Bittorrent",
+            "file": "/Users/agentofchaos/dev/codecrafters-projects/bittorrent-csharp/CodeCrafters.Bittorrent.csproj",
+            "problemMatcher": [],
+            "label": "dotnet: watch CodeCrafters.Bittorrent",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "type": "msbuild",
+            "problemMatcher": [
+                "$msCompile"
+            ],
+            "group": "build",
+            "label": "Build: CodeCrafters.Bittorrent.csproj",
+            "detail": "Build the CodeCrafters.Bittorrent.csproj project using dotnet build"
+        }
+    ]
+}
