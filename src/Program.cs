@@ -23,9 +23,8 @@ if (command == "decode")
 }
 else if (command == "info")
 {
-    string text = File.ReadAllText(param, Encoding.ASCII);
-    int offset = 0;
-    var decoded = Decode(text, out offset) as Dictionary<object, object>;
+    string text = File.ReadAllText(param, Encoding.Latin1);
+    var decoded = Decode(text, out _) as Dictionary<object, object>;
     Console.WriteLine($"Tracker URL: {decoded!["announce"]}");
 
     var info = decoded["info"] as Dictionary<object, object>;
@@ -35,18 +34,14 @@ else if (command == "info")
 
     using (SHA1 sha1 = SHA1.Create())
     {
-        byte[] data = File.ReadAllBytes(param);
-        int info_idx = text.IndexOf("4:info") + "4:info".Length;
-        byte[] inputBytes = data[info_idx..(text.Length - 1)];
-        byte[] hashBytes = sha1.ComputeHash(inputBytes);
-        string info_hash = Convert.ToHexString(hashBytes).ToLower();
-        Console.WriteLine($"Info Hash: {info_hash}");
-
-        int pieces_idx = text.IndexOf("pieces200:") + "pieces200:".Length;
-
-        byte[] pieces_bytes = data[pieces_idx..(data.Length - 2)];
-        Console.WriteLine($"Piece Hashes: {Convert.ToHexString(pieces_bytes).ToLower()}");
+        int info_idx = text.IndexOf("4:info") + "4:info".Length; // TODO: Properly Encode info Dictionary
+        string info_str = text[info_idx..(text.Length - 1)];
+        byte[] info_hash_bytes = sha1.ComputeHash(Encoding.Latin1.GetBytes(info_str));
+        string info_hash_hex = Convert.ToHexString(info_hash_bytes).ToLower();
+        Console.WriteLine($"Info Hash: {info_hash_hex}");
     }
+    var pieces_str = info!["pieces"] as string;
+    Console.WriteLine($"Piece Hashes: {Convert.ToHexString(Encoding.Latin1.GetBytes(pieces_str!)).ToLower()}");
 }
 else
 {
