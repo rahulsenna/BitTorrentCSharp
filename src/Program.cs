@@ -1,4 +1,7 @@
 using System.Text.Json;
+using System.IO;
+using System.Text;
+using System.Security.Cryptography;
 
 // Parse arguments
 var (command, param) = args.Length switch
@@ -17,6 +20,33 @@ if (command == "decode")
     int offset = 0;
     var value = Decode(param, out offset);
     Console.WriteLine(JsonSerializer.Serialize(value));
+}
+else if (command == "info")
+{
+    string text = File.ReadAllText(param, Encoding.ASCII);
+    int offset = 0;
+    var decoded = Decode(text, out offset) as Dictionary<object, object>;
+    Console.WriteLine($"Tracker URL: {decoded!["announce"]}");
+
+    var info = decoded["info"] as Dictionary<object, object>;
+
+    Console.WriteLine($"Length: {info!["length"]}");
+    Console.WriteLine($"Piece Length: {info!["piece length"]}");
+
+    using (SHA1 sha1 = SHA1.Create())
+    {
+        byte[] data = File.ReadAllBytes(param);
+        int info_idx = text.IndexOf("4:info") + "4:info".Length;
+        byte[] inputBytes = data[info_idx..(text.Length - 1)];
+        byte[] hashBytes = sha1.ComputeHash(inputBytes);
+        string info_hash = Convert.ToHexString(hashBytes).ToLower();
+        Console.WriteLine($"Info Hash: {info_hash}");
+
+        int pieces_idx = text.IndexOf("pieces200:") + "pieces200:".Length;
+
+        byte[] pieces_bytes = data[pieces_idx..(data.Length - 2)];
+        Console.WriteLine($"Piece Hashes: {Convert.ToHexString(pieces_bytes).ToLower()}");
+    }
 }
 else
 {
