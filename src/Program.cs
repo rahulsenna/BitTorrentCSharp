@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.IO;
 using System.Text;
 using System.Security.Cryptography;
+using System.Net;
 
 // Parse arguments
 var (command, param) = args.Length switch
@@ -23,7 +24,8 @@ if (command == "decode")
 }
 else if (command == "info")
 {
-    string text = File.ReadAllText(param, Encoding.Latin1);
+    string file = param;
+    string text = File.ReadAllText(file, Encoding.Latin1);
     var decoded = Decode(text, out _) as Dictionary<object, object>;
     Console.WriteLine($"Tracker URL: {decoded!["announce"]}");
 
@@ -32,16 +34,39 @@ else if (command == "info")
     Console.WriteLine($"Length: {info!["length"]}");
     Console.WriteLine($"Piece Length: {info!["piece length"]}");
 
-    using (SHA1 sha1 = SHA1.Create())
-    {
-        int info_idx = text.IndexOf("4:info") + "4:info".Length; // TODO: Properly Encode info Dictionary
-        string info_str = text[info_idx..(text.Length - 1)];
-        byte[] info_hash_bytes = sha1.ComputeHash(Encoding.Latin1.GetBytes(info_str));
-        string info_hash_hex = Convert.ToHexString(info_hash_bytes).ToLower();
-        Console.WriteLine($"Info Hash: {info_hash_hex}");
-    }
+    string info_hash_hex = Convert.ToHexString(get_info_hash_bytes(text)).ToLower();
+    Console.WriteLine($"Info Hash: {info_hash_hex}");
+
     var pieces_str = info!["pieces"] as string;
     Console.WriteLine($"Piece Hashes: {Convert.ToHexString(Encoding.Latin1.GetBytes(pieces_str!)).ToLower()}");
+}
+else if (command == "peers")
+{
+    string file = param;
+    string text = File.ReadAllText(file, Encoding.Latin1);
+    var decoded = Decode(text, out _) as Dictionary<object, object>;
+    var tracker_url = decoded!["announce"] as string;
+
+    string info_hash_hex = Convert.ToHexString(get_info_hash_bytes(text));
+    string info_hash_url_encoded = string.Join("", info_hash_hex.Chunk(2).Select(chars => $"%{new string(chars)}"));
+
+    var info = decoded["info"] as Dictionary<object, object>;
+    Int64 length = (Int64)info!["length"];
+
+    string url = $"{tracker_url}?port=6881&left={length}&downloaded=0&uploaded=0&compact=1&peer_id=THIS_IS_SPARTA_JKl0l&info_hash={info_hash_url_encoded}";
+    using HttpClient client = new();
+    HttpResponseMessage response = await client.GetAsync(url);
+    byte[] response_bin = await response.Content.ReadAsByteArrayAsync();
+    string response_text = Encoding.Latin1.GetString(response_bin);
+    var decoded_resp = Decode(response_text, out _) as Dictionary<object, object>;
+    var peers_str = decoded_resp!["peers"] as string;
+    byte[] peers_bin = Encoding.Latin1.GetBytes(peers_str!);
+
+    for (int i = 0; i < peers_bin.Length; i += 6)
+    {
+        string ip_port = $"{new IPAddress(peers_bin[i..(i+4)])}:{(peers_bin[i+4] << 8) | peers_bin[i+5]}";
+        Console.WriteLine(ip_port);
+    }
 }
 else
 {
@@ -116,4 +141,13 @@ object Decode(string encodedValue, out int offset)
         throw new InvalidOperationException("Unhandled encoded value: " + encodedValue);
     }
 
+}
+
+byte[] get_info_hash_bytes(string text)
+{
+    using SHA1 sha1 = SHA1.Create();
+    int info_idx = text.IndexOf("4:info") + "4:info".Length; // TODO: Properly Encode info Dictionary
+    string info_str = text[info_idx..(text.Length - 1)];
+    byte[] info_hash_bytes = sha1.ComputeHash(Encoding.Latin1.GetBytes(info_str));
+    return info_hash_bytes;
 }
