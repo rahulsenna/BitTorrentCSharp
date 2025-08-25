@@ -2,7 +2,7 @@
   "profiles": {
     "MyLaunchProfileName": {
       "commandName": "Project",
-      "commandLineArgs": "decode l6:bananai291ee"
+      "commandLineArgs": "peers /var/folders/0y/wdv0jtw90_gb738gt3zpjk2h0000gn/T/torrents3360708813/test.torrent"
     }
   }
 }

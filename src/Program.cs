@@ -3,13 +3,15 @@ using System.IO;
 using System.Text;
 using System.Security.Cryptography;
 using System.Net;
+using System.Net.Sockets;
 
 // Parse arguments
-var (command, param) = args.Length switch
+var (command, param, param2) = args.Length switch
 {
     0 => throw new InvalidOperationException("Usage: your_program.sh <command> <param>"),
     1 => throw new InvalidOperationException("Usage: your_program.sh <command> <param>"),
-    _ => (args[0], args[1])
+    2 => (args[0], args[1], null),
+    _ => (args[0], args[1], args[2])
 };
 
 // You can use print statements as follows for debugging, they'll be visible when running tests.
@@ -67,6 +69,18 @@ else if (command == "peers")
         string ip_port = $"{new IPAddress(peers_bin[i..(i+4)])}:{(peers_bin[i+4] << 8) | peers_bin[i+5]}";
         Console.WriteLine(ip_port);
     }
+}
+else if (command == "handshake")
+{
+    string torrent_file = param;
+    string torrent_data = File.ReadAllText(torrent_file, Encoding.Latin1);
+    string peer = param2!;
+    
+    string peer_ip = peer[0..peer.IndexOf(':')];
+    int port = Convert.ToInt32(peer[(peer.IndexOf(':') + 1)..]);
+    byte[] info_hash = get_info_hash_bytes(torrent_data);
+
+    handshake(peer_ip, port, info_hash);
 }
 else
 {
@@ -143,11 +157,37 @@ object Decode(string encodedValue, out int offset)
 
 }
 
-byte[] get_info_hash_bytes(string text)
+TcpClient handshake(string ip, int port, byte[] info_hash)
+{
+    TcpClient client = new();
+    client.Connect(ip, port);
+    Console.Error.WriteLine("Connetted to server");
+
+    using NetworkStream stream = client.GetStream();
+    byte[] handshake_buf = new byte[68];
+    handshake_buf[0] = 19;
+    Array.Copy(Encoding.Latin1.GetBytes("BitTorrent protocol"), 0, handshake_buf, 1, 19);
+
+    Array.Copy(info_hash, 0, handshake_buf, 28, 20);
+    Array.Copy(Encoding.Latin1.GetBytes("THIS_IS_SPARTA_JKl0l"), 0, handshake_buf, 48, 20);
+
+    stream.Write(handshake_buf);
+    byte[] resp_buf = new byte[68];
+    int read_bytes = stream.Read(resp_buf);
+    byte[] rec_info_hash = resp_buf[28..48];
+    if (read_bytes == 68 && rec_info_hash.SequenceEqual(info_hash))
+    {
+        var peer_id = Convert.ToHexString(resp_buf[48..68]).ToLower();
+        Console.WriteLine($"Peer ID: {peer_id}");
+    }
+    return client;
+}
+
+byte[] get_info_hash_bytes(string torrent_data)
 {
     using SHA1 sha1 = SHA1.Create();
-    int info_idx = text.IndexOf("4:info") + "4:info".Length; // TODO: Properly Encode info Dictionary
-    string info_str = text[info_idx..(text.Length - 1)];
+    int info_idx = torrent_data.IndexOf("4:info") + "4:info".Length; // TODO: Properly Encode info Dictionary
+    string info_str = torrent_data[info_idx..(torrent_data.Length - 1)];
     byte[] info_hash_bytes = sha1.ComputeHash(Encoding.Latin1.GetBytes(info_str));
     return info_hash_bytes;
 }
