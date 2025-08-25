@@ -1,19 +1,14 @@
 using System.Text.Json;
-using System.IO;
 using System.Text;
 using System.Security.Cryptography;
 using System.Net;
 using System.Net.Sockets;
-using System.ComponentModel.DataAnnotations;
-using System.Buffers.Binary;
 
 // Parse arguments
-var (command, param, param2) = args.Length switch
+var (command, param) = args.Length switch
 {
-    0 => throw new InvalidOperationException("Usage: your_program.sh <command> <param>"),
-    1 => throw new InvalidOperationException("Usage: your_program.sh <command> <param>"),
-    2 => (args[0], args[1], null),
-    _ => (args[0], args[1], args[2])
+    < 2 => throw new InvalidOperationException("Usage: your_program.sh <command> <param>"),
+    _ => (args[0], args[1])
 };
 
 // You can use print statements as follows for debugging, they'll be visible when running tests.
@@ -61,9 +56,13 @@ else if (command == "peers")
 }
 else if (command == "handshake")
 {
-    string torrent_file = param;
+    var (_, torrent_file, peer) = args.Length switch
+    {
+        < 3 => throw new InvalidOperationException($"Usage: your_program.sh {command} <torrent_file> <peer>"),
+        _ => (args[0], args[1], args[2])
+    };
+
     string torrent_data = File.ReadAllText(torrent_file, Encoding.Latin1);
-    string peer = param2!;
 
     string peer_ip = peer[0..peer.IndexOf(':')];
     int port = Convert.ToInt32(peer[(peer.IndexOf(':') + 1)..]);
@@ -75,6 +74,7 @@ else if (command == "download_piece")
 {
     var (_, op, out_file, torrent_file, piece_index) = args.Length switch
     {
+        < 5 => throw new InvalidOperationException($"Usage: your_program.sh {command} -o <out_file> <torrent_file> <piece_index>"),
         _ => (args[0], args[1], args[2], args[3], Convert.ToInt32(args[4]))
     };
 
@@ -103,6 +103,7 @@ else if (command == "download")
 {
     var (_, op, out_file, torrent_file) = args.Length switch
     {
+        < 4 => throw new InvalidOperationException($"Usage: your_program.sh {command} -o <out_file> <torrent_file>"),
         _ => (args[0], args[1], args[2], args[3])
     };
 
