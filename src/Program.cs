@@ -228,7 +228,47 @@ else if (command == "magnet_download_piece")
     await download_piece_2(piece_buffer, piece_size, piece_index, peer.stream, magnet: true);
     File.WriteAllBytes(out_file, piece_buffer);
 }
+else if (command == "magnet_download")
+{
+    var (_, op, out_file, magnet_link) = args.Length switch
+    {
+        < 4 => throw new InvalidOperationException($"Usage: your_program.sh {command} -o <out_file> <magnet_link>"),
+        _ => (args[0], args[1], args[2], args[3])
+    };
 
+    var (tracker_url, info_hash) = get_magnet_tracker_and_info_hash(magnet_link);
+    byte[] info_hash_bytes = Convert.FromHexString(info_hash);
+    var peers = await get_peers(tracker_url, info_hash_bytes);
+    PeerInfo peer = await handshake(peers[0].Item1, peers[0].Item2, info_hash_bytes, true);
+    var metadata = await get_magnet_metadata(peer) as Dictionary<object, object>;
+    peer.stream.Close();
+
+    long total_size = (long)metadata!["length"];
+    long standard_piece_len = (long)metadata!["piece length"];
+    long piece_count = total_size / standard_piece_len;
+    long used_len = piece_count * standard_piece_len;
+
+    byte[] file_buffer = new byte[total_size];
+    for (long piece_index = 0; piece_index <= piece_count;)
+    {
+        List<Task> download_tasks = [];
+        foreach (var (ip, port) in peers)
+        {
+            Console.WriteLine($"piece_index: {piece_index}");
+            peer = await handshake(ip, port, info_hash_bytes, true);
+            long offset = piece_index * standard_piece_len;
+            long piece_size = (piece_index < piece_count) ? standard_piece_len : (total_size > used_len ? total_size - used_len : 0);
+            download_tasks.Add(download_piece_2(file_buffer, (int)piece_size, (int)piece_index, peer.stream, (int)offset, true));
+            piece_index++;
+            if (piece_index > piece_count)
+                break;
+        }
+        await Task.WhenAll(download_tasks);
+        peers = await get_peers(tracker_url, info_hash_bytes);
+    }
+
+    File.WriteAllBytes(out_file, file_buffer);
+}
 
 else
 {
