@@ -141,7 +141,7 @@ else if (command == "download")
         {
             Console.WriteLine($"piece_index: {piece_index}");
 
-            int offset = piece_index * standard_piece_len;
+            long offset = piece_index * standard_piece_len;
             int piece_size = (piece_index < piece_count) ? standard_piece_len : (total_size > used_len ? total_size - used_len : 0);
             download_tasks.Add(download_piece(file_buffer, ip, port, info_hash_bytes, piece_size, piece_index, offset));
             piece_index++;
@@ -515,7 +515,7 @@ static void hexdump(byte[] data)
         buffer.ToString());
 }
   
-async Task download_piece_2(byte[] piece_buffer, int piece_size, int piece_index, NetworkStream stream, int buffer_offset = 0, bool magnet = false)
+async Task download_piece_2(byte[] piece_buffer, int piece_size, int piece_index, NetworkStream stream, long buffer_offset = 0, bool magnet = false)
 {
     // Phase 1: Handle bitfield messages
     int message_len;
@@ -570,10 +570,10 @@ async Task download_piece_2(byte[] piece_buffer, int piece_size, int piece_index
 
         int byte_offset = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(info_buf[5..9]));
         int block_len = message_len - 9;
-        await stream.ReadExactlyAsync(piece_buffer, buffer_offset + byte_offset, block_len);
+        await stream.ReadExactlyAsync(piece_buffer, (int)(buffer_offset + byte_offset), block_len);
     }
 }
-async Task download_piece(byte[] piece_buffer, string ip, int port, byte[] info_hash_bytes, int piece_size, int piece_index, int buffer_offset = 0, bool magnet = false)
+async Task download_piece(byte[] piece_buffer, string ip, int port, byte[] info_hash_bytes, int piece_size, int piece_index, long buffer_offset = 0, bool magnet = false)
 {
     PeerInfo peer = await handshake(ip, port, info_hash_bytes);
     using var stream = peer.stream;
