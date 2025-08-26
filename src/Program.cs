@@ -12,6 +12,16 @@ var (command, param) = args.Length switch
     _ => (args[0], args[1])
 };
 
+const int HANDSHAKE_RESPONSE_SIZE = 68;
+const int INFO_HASH_OFFSET = 28;
+const int INFO_HASH_LENGTH = 20;
+const int PEER_ID_OFFSET = 48;
+const int PEER_ID_LENGTH = 20;
+const int EXTENSION_SUPPORT_FLAG_OFFSET = 25;
+const byte EXTENSION_SUPPORT_FLAG = 0x10;
+const byte MESSAGE_ID = 20;
+const byte EXTENSION_MESSAGE_ID = 0;
+
 // You can use print statements as follows for debugging, they'll be visible when running tests.
 Console.Error.WriteLine("Logs from your program will appear here!");
 
@@ -166,16 +176,37 @@ else if (command == "magnet_handshake")
     pos = magnet_link.IndexOf("tr=") + "tr=".Length;
     string tracker_url = magnet_link[pos..];
 
-    Console.WriteLine($"Info Hash: {info_hash_bytes}");
+    var peers = await get_peers(Uri.UnescapeDataString(tracker_url), info_hash_bytes);
+    var (ip, port) = peers[0];
+    await handshake(ip, port, info_hash_bytes, true);
+}
+else if (command == "magnet_info")
+{
+    string magnet_link = param;
+
+    int pos = magnet_link.IndexOf("xt=urn:btih:") + "xt=urn:btih:".Length;
+    string info_hash = magnet_link[pos..(pos + 40)];
+    byte[] info_hash_bytes = Convert.FromHexString(info_hash);
+
+    pos = magnet_link.IndexOf("tr=") + "tr=".Length;
+    string tracker_url = magnet_link[pos..];
+
+    Console.WriteLine($"Info Hash: {info_hash}");
     Console.WriteLine($"Tracker URL: {Uri.UnescapeDataString(tracker_url)}");
 
     var peers = await get_peers(Uri.UnescapeDataString(tracker_url), info_hash_bytes);
     var (ip, port) = peers[0];
-    
+    PeerInfo peer = await handshake(ip, port, info_hash_bytes, true);
 
-    await handshake(ip, port, info_hash_bytes, true);
+    var metadata = await get_magnet_metadata(peer) as Dictionary<object, object>;
 
-    
+    int length = (int)(long)metadata!["length"];
+    int piece_length = (int)(long)metadata!["piece length"];
+    Console.WriteLine($"Length: {length}");
+    Console.WriteLine($"Piece Length: {piece_length}");
+
+    string pieces_hashes = Convert.ToHexStringLower(Encoding.Latin1.GetBytes((string)metadata!["pieces"]));
+    Console.WriteLine(string.Join('\n', Enumerable.Range(0, pieces_hashes.Length / 40).Select(i => pieces_hashes.Substring(i * 40, 40))));
 }
 
 else
@@ -253,17 +284,6 @@ object Decode(string encodedValue, out int offset)
 
 }
 
-
-
-const int HANDSHAKE_RESPONSE_SIZE = 68;
-const int INFO_HASH_OFFSET = 28;
-const int INFO_HASH_LENGTH = 20;
-const int PEER_ID_OFFSET = 48;
-const int PEER_ID_LENGTH = 20;
-const int EXTENSION_SUPPORT_FLAG_OFFSET = 25;
-const byte EXTENSION_SUPPORT_FLAG = 0x10;
-const byte MESSAGE_ID = 20;
-const byte EXTENSION_MESSAGE_ID = 0;
 
 async Task<PeerInfo> handshake(string ip, int port, byte[] info_hash, bool extension = false)
 {
@@ -424,7 +444,7 @@ static void hexdump(byte[] data)
         buffer.ToString());
 }
   
-async Task download_piece(byte[] piece_buffer, string ip, int port, byte[] info_hash_bytes, int piece_size, int piece_index, int buffer_offset = 0) 
+async Task download_piece(byte[] piece_buffer, string ip, int port, byte[] info_hash_bytes, int piece_size, int piece_index, int buffer_offset = 0)
 {
     PeerInfo peer = await handshake(ip, port, info_hash_bytes);
     using var stream = peer.stream;
@@ -479,6 +499,27 @@ async Task download_piece(byte[] piece_buffer, string ip, int port, byte[] info_
         int block_len = message_len - 9;
         await stream.ReadExactlyAsync(piece_buffer, buffer_offset + byte_offset, block_len);
     }
+}
+
+async Task<object> get_magnet_metadata(PeerInfo peer)
+{
+    byte[] payload = Encoding.Latin1.GetBytes("d8:msg_typei0e5:piecei0ee");
+    byte[] len_data = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(payload.Length + 2));
+    await peer.stream.WriteAsync(len_data);
+    byte[] msg_data = { (byte)MESSAGE_ID, (byte)peer.ut_metadata };
+    await peer.stream.WriteAsync(msg_data);
+    await peer.stream.WriteAsync(payload);
+
+    await peer.stream.ReadExactlyAsync(len_data, 0, 4);
+    int message_len = len_data[0] << 24 | len_data[1] << 16 | len_data[2] << 8 | len_data[3];
+
+    byte[] resp_buf = new byte[message_len];
+    await peer.stream.ReadExactlyAsync(msg_data, 0, 2); // Message ID and Ext Message ID
+    await peer.stream.ReadExactlyAsync(resp_buf, 0, message_len-2);
+
+    string metadata_str = Encoding.Latin1.GetString(resp_buf);
+    Decode(metadata_str, out int offset);
+    return Decode(metadata_str[offset..], out _);
 }
 
 enum Message : byte
