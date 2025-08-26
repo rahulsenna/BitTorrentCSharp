@@ -3,6 +3,7 @@ using System.Text;
 using System.Security.Cryptography;
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Encodings.Web;
 
 // Parse arguments
 var (command, param) = args.Length switch
@@ -142,6 +143,40 @@ else if (command == "download")
 
     File.WriteAllBytes(out_file, file_buffer);
 }
+else if (command == "magnet_parse")
+{
+    string magnet_link = param;
+
+    int pos = magnet_link.IndexOf("xt=urn:btih:") + "xt=urn:btih:".Length;
+    string info_hash = magnet_link[pos..(pos + 40)];
+
+    pos = magnet_link.IndexOf("tr=") + "tr=".Length;
+    string url = magnet_link[pos..];
+
+    Console.WriteLine($"Info Hash: {info_hash}");
+    Console.WriteLine($"Tracker URL: {Uri.UnescapeDataString(url)}");
+}
+else if (command == "magnet_handshake")
+{
+    string magnet_link = param;
+
+    int pos = magnet_link.IndexOf("xt=urn:btih:") + "xt=urn:btih:".Length;
+    byte[] info_hash_bytes = Convert.FromHexString(magnet_link[pos..(pos + 40)]);
+
+    pos = magnet_link.IndexOf("tr=") + "tr=".Length;
+    string tracker_url = magnet_link[pos..];
+
+    Console.WriteLine($"Info Hash: {info_hash_bytes}");
+    Console.WriteLine($"Tracker URL: {Uri.UnescapeDataString(tracker_url)}");
+
+    var peers = await get_peers(Uri.UnescapeDataString(tracker_url), info_hash_bytes);
+    var (ip, port) = peers[0];
+    
+
+    await handshake(ip, port, info_hash_bytes, true);
+
+    
+}
 
 else
 {
@@ -218,29 +253,86 @@ object Decode(string encodedValue, out int offset)
 
 }
 
-async Task<NetworkStream> handshake(string ip, int port, byte[] info_hash)
+
+
+const int HANDSHAKE_RESPONSE_SIZE = 68;
+const int INFO_HASH_OFFSET = 28;
+const int INFO_HASH_LENGTH = 20;
+const int PEER_ID_OFFSET = 48;
+const int PEER_ID_LENGTH = 20;
+const int EXTENSION_SUPPORT_FLAG_OFFSET = 25;
+const byte EXTENSION_SUPPORT_FLAG = 0x10;
+const byte MESSAGE_ID = 20;
+const byte EXTENSION_MESSAGE_ID = 0;
+
+async Task<PeerInfo> handshake(string ip, int port, byte[] info_hash, bool extension = false)
 {
     TcpClient client = new();
     client.Connect(ip, port);
 
     NetworkStream stream = client.GetStream();
-    byte[] handshake_buf = new byte[68];
+    PeerInfo peer = new(stream);
+
+    byte[] handshake_buf = new byte[HANDSHAKE_RESPONSE_SIZE];
     handshake_buf[0] = 19;
     Array.Copy(Encoding.Latin1.GetBytes("BitTorrent protocol"), 0, handshake_buf, 1, 19);
 
-    Array.Copy(info_hash, 0, handshake_buf, 28, 20);
-    Array.Copy(Encoding.Latin1.GetBytes("THIS_IS_SPARTA_JKl0l"), 0, handshake_buf, 48, 20);
+    Array.Copy(info_hash, 0, handshake_buf, INFO_HASH_OFFSET, INFO_HASH_LENGTH);
+    Array.Copy(Encoding.Latin1.GetBytes("THIS_IS_SPARTA_JKl0l"), 0, handshake_buf, PEER_ID_OFFSET, PEER_ID_LENGTH);
+
+    if (extension)
+        handshake_buf[EXTENSION_SUPPORT_FLAG_OFFSET] = EXTENSION_SUPPORT_FLAG;
 
     await stream.WriteAsync(handshake_buf);
-    byte[] resp_buf = new byte[68];
-    int read_bytes = await stream.ReadAsync(resp_buf);
-    byte[] rec_info_hash = resp_buf[28..48];
-    if (read_bytes == 68 && rec_info_hash.SequenceEqual(info_hash))
+    byte[] resp_buf = new byte[HANDSHAKE_RESPONSE_SIZE];
+    await stream.ReadExactlyAsync(resp_buf, 0, HANDSHAKE_RESPONSE_SIZE);
+    byte[] rec_info_hash = resp_buf[INFO_HASH_OFFSET..PEER_ID_OFFSET];
+    if (rec_info_hash.SequenceEqual(info_hash))
     {
-        var peer_id = Convert.ToHexStringLower(resp_buf[48..68]);
+        var peer_id = Convert.ToHexStringLower(resp_buf[PEER_ID_OFFSET..HANDSHAKE_RESPONSE_SIZE]);
         Console.WriteLine($"Peer ID: {peer_id}");
+        if (resp_buf[EXTENSION_SUPPORT_FLAG_OFFSET] == EXTENSION_SUPPORT_FLAG)
+        {
+            Console.Error.WriteLine("---------[ Extension Supported ]---------");
+            byte[] meta_data_req = Encoding.Latin1.GetBytes("d1:md11:ut_metadatai1e6:ut_pexi2ee1:pi6881ee");
+            int len = meta_data_req.Length + /* message id */ 1 + /* ext message id */ 1;
+            byte[] len_data = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(len));
+
+            await stream.WriteAsync(len_data);
+            byte[] msg_id = { MESSAGE_ID, EXTENSION_MESSAGE_ID };
+            await stream.WriteAsync(msg_id);
+            await stream.WriteAsync(meta_data_req);
+
+            //--[ BitField]--------------------
+            byte[] len_buf = new byte[4];
+            await stream.ReadExactlyAsync(len_buf, 0, 4);
+            int message_len = len_buf[0] << 24 | len_buf[1] << 16 | len_buf[2] << 8 | len_buf[3];
+
+
+            byte[] bitfield_buf = new byte[message_len];
+            await stream.ReadExactlyAsync(bitfield_buf, 0, message_len);
+
+            //--[ Receive Extension Handshake ]--------------------
+            await stream.ReadExactlyAsync(len_buf, 0, 4);
+            message_len = len_buf[0] << 24 | len_buf[1] << 16 | len_buf[2] << 8 | len_buf[3];
+
+            await stream.ReadExactlyAsync(resp_buf, 0, 2); // Message ID and Ext Message ID
+            message_len -= 2;
+
+            byte[] meta_data_buf = new byte[message_len];
+            await stream.ReadExactlyAsync(meta_data_buf, 0, message_len);
+
+            string meta_data_str = Encoding.Latin1.GetString(meta_data_buf);
+            var meta_data_obj = Decode(meta_data_str, out _) as Dictionary<object, object>;
+
+            var m = meta_data_obj!["m"] as Dictionary<object, object>;
+            int ut_metadata = (int)(long)m!["ut_metadata"];
+            Console.WriteLine($"Peer Metadata Extension ID: {ut_metadata}");
+            peer.ut_metadata = ut_metadata;
+            peer.extension = true;
+        }
     }
-    return stream;
+    return peer;
 }
 
 byte[] get_info_hash_bytes(string torrent_data)
@@ -334,7 +426,8 @@ static void hexdump(byte[] data)
   
 async Task download_piece(byte[] piece_buffer, string ip, int port, byte[] info_hash_bytes, int piece_size, int piece_index, int buffer_offset = 0) 
 {
-    using var stream = await handshake(ip, port, info_hash_bytes);
+    PeerInfo peer = await handshake(ip, port, info_hash_bytes);
+    using var stream = peer.stream;
     // Phase 1: Handle bitfield messages
     byte[] len_buf = new byte[4];
     await stream.ReadExactlyAsync(len_buf.AsMemory(0, 4));
@@ -399,4 +492,11 @@ enum Message : byte
     Request,
     Piece,
     Cancel,
+};
+
+struct PeerInfo(NetworkStream stream, byte ut_metadata = 0, bool extension = false)
+{
+    public NetworkStream stream = stream;
+    public int ut_metadata = ut_metadata;
+    public bool extension = extension;
 };
