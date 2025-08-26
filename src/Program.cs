@@ -184,17 +184,12 @@ else if (command == "magnet_info")
 {
     string magnet_link = param;
 
-    int pos = magnet_link.IndexOf("xt=urn:btih:") + "xt=urn:btih:".Length;
-    string info_hash = magnet_link[pos..(pos + 40)];
-    byte[] info_hash_bytes = Convert.FromHexString(info_hash);
-
-    pos = magnet_link.IndexOf("tr=") + "tr=".Length;
-    string tracker_url = magnet_link[pos..];
-
+    var (tracker_url, info_hash) = get_magnet_tracker_and_info_hash(magnet_link);
     Console.WriteLine($"Info Hash: {info_hash}");
-    Console.WriteLine($"Tracker URL: {Uri.UnescapeDataString(tracker_url)}");
+    Console.WriteLine($"Tracker URL: {tracker_url}");
 
-    var peers = await get_peers(Uri.UnescapeDataString(tracker_url), info_hash_bytes);
+    byte[] info_hash_bytes = Convert.FromHexString(info_hash);
+    var peers = await get_peers(tracker_url, info_hash_bytes);
     var (ip, port) = peers[0];
     PeerInfo peer = await handshake(ip, port, info_hash_bytes, true);
 
@@ -208,10 +203,46 @@ else if (command == "magnet_info")
     string pieces_hashes = Convert.ToHexStringLower(Encoding.Latin1.GetBytes((string)metadata!["pieces"]));
     Console.WriteLine(string.Join('\n', Enumerable.Range(0, pieces_hashes.Length / 40).Select(i => pieces_hashes.Substring(i * 40, 40))));
 }
+else if (command == "magnet_download_piece")
+{
+    var (_, op, out_file, magnet_link, piece_index) = args.Length switch
+    {
+        < 5 => throw new InvalidOperationException($"Usage: your_program.sh {command} -o <out_file> <magnet_link> <piece_index>"),
+        _ => (args[0], args[1], args[2], args[3], Convert.ToInt32(args[4]))
+    };
+
+    var (tracker_url, info_hash) = get_magnet_tracker_and_info_hash(magnet_link);
+    byte[] info_hash_bytes = Convert.FromHexString(info_hash);
+    var peers = await get_peers(tracker_url, info_hash_bytes);
+    var (ip, port) = peers[0];
+    PeerInfo peer = await handshake(ip, port, info_hash_bytes, true);
+    var metadata = await get_magnet_metadata(peer) as Dictionary<object, object>;
+    int total_size = (int)(long)metadata!["length"];
+    int standard_piece_len = (int)(long)metadata!["piece length"];
+    int piece_count = total_size / standard_piece_len;
+    int used_len = piece_count * standard_piece_len;
+    int piece_size = (piece_index < piece_count) ? standard_piece_len : (total_size > used_len ? total_size - used_len : 0);
+
+
+    byte[] piece_buffer = new byte[piece_size];
+    await download_piece_2(piece_buffer, piece_size, piece_index, peer.stream, magnet: true);
+    File.WriteAllBytes(out_file, piece_buffer);
+}
+
 
 else
 {
     throw new InvalidOperationException($"Invalid command: {command}");
+}
+
+(string, string) get_magnet_tracker_and_info_hash(string magnet_link)
+{
+    int pos = magnet_link.IndexOf("xt=urn:btih:") + "xt=urn:btih:".Length;
+    string info_hash = magnet_link[pos..(pos + 40)];
+
+    pos = magnet_link.IndexOf("tr=") + "tr=".Length;
+    string tracker_url = Uri.UnescapeDataString(magnet_link[pos..]);
+    return (tracker_url, info_hash);
 }
 
 object Decode(string encodedValue, out int offset)
@@ -444,22 +475,24 @@ static void hexdump(byte[] data)
         buffer.ToString());
 }
   
-async Task download_piece(byte[] piece_buffer, string ip, int port, byte[] info_hash_bytes, int piece_size, int piece_index, int buffer_offset = 0)
+async Task download_piece_2(byte[] piece_buffer, int piece_size, int piece_index, NetworkStream stream, int buffer_offset = 0, bool magnet = false)
 {
-    PeerInfo peer = await handshake(ip, port, info_hash_bytes);
-    using var stream = peer.stream;
     // Phase 1: Handle bitfield messages
+    int message_len;
     byte[] len_buf = new byte[4];
-    await stream.ReadExactlyAsync(len_buf.AsMemory(0, 4));
-    int message_len = len_buf[0] << 24 | len_buf[1] << 16 | len_buf[2] << 8 | len_buf[3];
-
-    byte[] resp_buf = new byte[message_len];
-    await stream.ReadExactlyAsync(resp_buf, 0, message_len);
-
-    if (resp_buf[0] == (byte)Message.Bitfield)
-    {
-        byte[] req = { 0, 0, 0, 1, (byte)Message.Interested };
+    byte[] resp_buf;
+    byte[] req = [0, 0, 0, 1, (byte)Message.Interested];
+    if (magnet)
         await stream.WriteAsync(req.AsMemory(0, 5));
+    else
+    {
+        await stream.ReadExactlyAsync(len_buf, 0, 4);
+        message_len = len_buf[0] << 24 | len_buf[1] << 16 | len_buf[2] << 8 | len_buf[3];
+        resp_buf = new byte[message_len];
+        await stream.ReadExactlyAsync(resp_buf, 0, message_len);
+
+        if (resp_buf[0] == (byte)Message.Bitfield)
+            await stream.WriteAsync(req.AsMemory(0, 5));
     }
 
     // Phase 2: Handle unchoke and send requests
@@ -499,6 +532,13 @@ async Task download_piece(byte[] piece_buffer, string ip, int port, byte[] info_
         int block_len = message_len - 9;
         await stream.ReadExactlyAsync(piece_buffer, buffer_offset + byte_offset, block_len);
     }
+}
+async Task download_piece(byte[] piece_buffer, string ip, int port, byte[] info_hash_bytes, int piece_size, int piece_index, int buffer_offset = 0, bool magnet = false)
+{
+    PeerInfo peer = await handshake(ip, port, info_hash_bytes);
+    using var stream = peer.stream;
+    await download_piece_2(piece_buffer, piece_size, piece_index, stream, buffer_offset, magnet);
+    
 }
 
 async Task<object> get_magnet_metadata(PeerInfo peer)
