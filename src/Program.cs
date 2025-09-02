@@ -102,13 +102,23 @@ else if (command == "download_piece")
     int used_len = piece_count * standard_piece_len;
     int piece_size = (piece_index < piece_count) ? standard_piece_len : (total_size > used_len ? total_size - used_len : 0);
 
-
-    var peers = await get_peers(tracker_url, info_hash_bytes, total_size);
-    var (ip, port) = peers[0];
-
     byte[] piece_buffer = new byte[piece_size];
-    await download_piece(piece_buffer, ip, port, info_hash_bytes, piece_size, piece_index);
-    File.WriteAllBytes(out_file, piece_buffer);
+    while (true)
+    {
+        var peers = await get_peers(tracker_url, info_hash_bytes, total_size);
+        foreach (var (ip, port) in peers)
+        {
+            Console.WriteLine($"Downloading piece {piece_index} from {ip}:{port}");
+            if ((await download_piece(piece_buffer, ip, port, info_hash_bytes, piece_size, piece_index)).Item1)
+            {
+                Console.WriteLine($"Successfully downloaded piece {piece_index}");
+                File.WriteAllBytes(out_file, piece_buffer);
+                return;
+            }
+            Console.WriteLine($"Failed to download piece {piece_index}, will retry");
+        }
+    }
+    
 }
 else if (command == "download")
 {
@@ -133,25 +143,49 @@ else if (command == "download")
     Console.WriteLine($"piece_count: {piece_count}");
     byte[] file_buffer = new byte[total_size];
 
-    for (int piece_index = 0; piece_index <= piece_count;)
+    // Track which pieces still need downloading
+    var pending_pieces = new HashSet<int>();
+    for (int i = 0; i <= piece_count; i++)
+        pending_pieces.Add(i);
+    
+    while (pending_pieces.Count > 0)
     {
-        var peers = await get_peers(tracker_url, info_hash_bytes, total_size);
-        List<Task> download_tasks = [];
-        foreach (var (ip, port) in peers)
+        List<(string, int)> peers = await get_peers(tracker_url, info_hash_bytes, total_size);
+        var download_tasks = new List<Task<(bool success, int piece_index)>>();
+
+        var pieces_to_download = pending_pieces.Take(peers.Count).ToList();
+
+        for (int i = 0; i < pieces_to_download.Count; i++)
         {
-            Console.WriteLine($"piece_index: {piece_index}");
+            int piece_index = pieces_to_download[i];
+            var (ip, port) = peers[i];
 
             long offset = piece_index * standard_piece_len;
             int piece_size = (piece_index < piece_count) ? standard_piece_len : (total_size > used_len ? total_size - used_len : 0);
+
+            if (piece_size <= 0) continue;
+
+            Console.WriteLine($"Downloading piece {piece_index} from {ip}:{port}");
             download_tasks.Add(download_piece(file_buffer, ip, port, info_hash_bytes, piece_size, piece_index, offset));
-            piece_index++;
-            if (piece_index > piece_count)
-                break;
         }
-        await Task.WhenAll(download_tasks);
+
+        var results = await Task.WhenAll(download_tasks);
+
+        foreach (var (success, piece_index) in results)
+        {
+            if (success)
+            {
+                Console.WriteLine($"Successfully downloaded piece {piece_index}");
+                pending_pieces.Remove(piece_index);
+            }
+            else
+                Console.WriteLine($"Failed to download piece {piece_index}, will retry");
+        }
+        Console.WriteLine($"Pieces remaining: {pending_pieces.Count}");
     }
 
     File.WriteAllBytes(out_file, file_buffer);
+    Console.WriteLine($"Download completed: {out_file}");
 }
 else if (command == "magnet_parse")
 {
@@ -213,20 +247,34 @@ else if (command == "magnet_download_piece")
 
     var (tracker_url, info_hash) = get_magnet_tracker_and_info_hash(magnet_link);
     byte[] info_hash_bytes = Convert.FromHexString(info_hash);
-    var peers = await get_peers(tracker_url, info_hash_bytes);
-    var (ip, port) = peers[0];
-    PeerInfo peer = await handshake(ip, port, info_hash_bytes, true);
-    var metadata = await get_magnet_metadata(peer) as Dictionary<object, object>;
-    int total_size = (int)(long)metadata!["length"];
-    int standard_piece_len = (int)(long)metadata!["piece length"];
-    int piece_count = total_size / standard_piece_len;
-    int used_len = piece_count * standard_piece_len;
-    int piece_size = (piece_index < piece_count) ? standard_piece_len : (total_size > used_len ? total_size - used_len : 0);
 
-
-    byte[] piece_buffer = new byte[piece_size];
-    await download_piece_2(piece_buffer, piece_size, piece_index, peer.stream, magnet: true);
-    File.WriteAllBytes(out_file, piece_buffer);
+    while (true)
+    {
+        var peers = await get_peers(tracker_url, info_hash_bytes);
+        foreach (var (ip, port) in peers)
+        {
+            try
+            {
+                PeerInfo peer = await handshake(ip, port, info_hash_bytes, true);
+                var metadata = await get_magnet_metadata(peer) as Dictionary<object, object>;
+                int total_size = (int)(long)metadata!["length"];
+                int standard_piece_len = (int)(long)metadata!["piece length"];
+                int piece_count = total_size / standard_piece_len;
+                int used_len = piece_count * standard_piece_len;
+                int piece_size = (piece_index < piece_count) ? standard_piece_len : (total_size > used_len ? total_size - used_len : 0);
+                byte[] piece_buffer = new byte[piece_size];
+                if (await download_piece_2(piece_buffer, piece_size, piece_index, peer.stream, magnet: true))
+                {
+                    File.WriteAllBytes(out_file, piece_buffer);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed: {ex.Message}");
+            }
+        }
+    }
 }
 else if (command == "magnet_download")
 {
@@ -238,33 +286,77 @@ else if (command == "magnet_download")
 
     var (tracker_url, info_hash) = get_magnet_tracker_and_info_hash(magnet_link);
     byte[] info_hash_bytes = Convert.FromHexString(info_hash);
-    var peers = await get_peers(tracker_url, info_hash_bytes);
-    PeerInfo peer = await handshake(peers[0].Item1, peers[0].Item2, info_hash_bytes, true);
-    var metadata = await get_magnet_metadata(peer) as Dictionary<object, object>;
-    peer.stream.Close();
+    var m_peers = await get_peers(tracker_url, info_hash_bytes);
+    Dictionary<object, object>? metadata = null;
 
-    long total_size = (long)metadata!["length"];
-    long standard_piece_len = (long)metadata!["piece length"];
-    long piece_count = total_size / standard_piece_len;
-    long used_len = piece_count * standard_piece_len;
+    foreach (var (m_ip, m_port) in m_peers)
+    {
+        try
+        {
+            PeerInfo peer = await handshake(m_ip, m_port, info_hash_bytes, true);
+            metadata = await get_magnet_metadata(peer) as Dictionary<object, object>;
+            peer.stream.Close();
+            if (metadata != null)
+                break;
+            
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to get metadata from {m_ip}:{m_port}: {ex.Message}");
+        }
+    }
+
+    if (metadata == null)
+    {
+        throw new InvalidOperationException("Could not retrieve metadata from any peer");
+    }
+
+
+    int total_size = (int)(long)metadata!["length"];
+    int standard_piece_len = (int)(long)metadata!["piece length"];
+    int piece_count = total_size / standard_piece_len;
+    int used_len = piece_count * standard_piece_len;
 
     byte[] file_buffer = new byte[total_size];
-    for (long piece_index = 0; piece_index <= piece_count;)
+
+    var pending_pieces = new HashSet<int>();
+    for (int i = 0; i <= piece_count; i++)
+        pending_pieces.Add(i);
+
+    while (pending_pieces.Count > 0)
     {
-        List<Task> download_tasks = [];
-        foreach (var (ip, port) in peers)
+        List<(string, int)> peers = await get_peers(tracker_url, info_hash_bytes, total_size);
+        var download_tasks = new List<Task<(bool success, int piece_index)>>();
+
+        var pieces_to_download = pending_pieces.Take(peers.Count).ToList();
+
+        for (int i = 0; i < pieces_to_download.Count; i++)
         {
-            Console.WriteLine($"piece_index: {piece_index}");
-            peer = await handshake(ip, port, info_hash_bytes, true);
+            int piece_index = pieces_to_download[i];
+            var (ip, port) = peers[i];
+
             long offset = piece_index * standard_piece_len;
-            long piece_size = (piece_index < piece_count) ? standard_piece_len : (total_size > used_len ? total_size - used_len : 0);
-            download_tasks.Add(download_piece_2(file_buffer, (int)piece_size, (int)piece_index, peer.stream, (int)offset, true));
-            piece_index++;
-            if (piece_index > piece_count)
-                break;
+            int piece_size = (piece_index < piece_count) ? standard_piece_len : (total_size > used_len ? total_size - used_len : 0);
+
+            if (piece_size <= 0) continue;
+
+            Console.WriteLine($"Downloading piece {piece_index} from {ip}:{port}");
+            download_tasks.Add(download_piece(file_buffer, ip, port, info_hash_bytes, piece_size, piece_index, offset, magnet: true));
         }
-        await Task.WhenAll(download_tasks);
-        peers = await get_peers(tracker_url, info_hash_bytes);
+
+        var results = await Task.WhenAll(download_tasks);
+
+        foreach (var (success, piece_index) in results)
+        {
+            if (success)
+            {
+                Console.WriteLine($"Successfully downloaded piece {piece_index}");
+                pending_pieces.Remove(piece_index);
+            }
+            else
+                Console.WriteLine($"Failed to download piece {piece_index}, will retry");
+        }
+        Console.WriteLine($"Pieces remaining: {pending_pieces.Count}");
     }
 
     File.WriteAllBytes(out_file, file_buffer);
@@ -514,72 +606,96 @@ static void hexdump(byte[] data)
         "----------+-------------------------------------------------+-----------------\n" +
         buffer.ToString());
 }
-  
-async Task download_piece_2(byte[] piece_buffer, int piece_size, int piece_index, NetworkStream stream, long buffer_offset = 0, bool magnet = false)
+
+async Task<bool> download_piece_2(byte[] piece_buffer, int piece_size, int piece_index, NetworkStream stream, long buffer_offset = 0, bool magnet = false)
 {
-    // Phase 1: Handle bitfield messages
-    int message_len;
-    byte[] len_buf = new byte[4];
-    byte[] resp_buf;
-    byte[] req = [0, 0, 0, 1, (byte)Message.Interested];
-    if (magnet)
-        await stream.WriteAsync(req.AsMemory(0, 5));
-    else
+    try
     {
+        int message_len;
+        byte[] len_buf = new byte[4];
+        byte[] resp_buf;
+        byte[] req = [0, 0, 0, 1, (byte)Message.Interested];
+
+        if (magnet)
+            await stream.WriteAsync(req.AsMemory(0, 5));
+        else
+        {
+            await stream.ReadExactlyAsync(len_buf, 0, 4);
+            message_len = len_buf[0] << 24 | len_buf[1] << 16 | len_buf[2] << 8 | len_buf[3];
+            resp_buf = new byte[message_len];
+            await stream.ReadExactlyAsync(resp_buf, 0, message_len);
+
+            if (resp_buf[0] == (byte)Message.Bitfield)
+                await stream.WriteAsync(req.AsMemory(0, 5));
+        }
+
+        // Phase 2: Handle unchoke and send requests
+        int chunk_count = (piece_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
         await stream.ReadExactlyAsync(len_buf, 0, 4);
         message_len = len_buf[0] << 24 | len_buf[1] << 16 | len_buf[2] << 8 | len_buf[3];
         resp_buf = new byte[message_len];
         await stream.ReadExactlyAsync(resp_buf, 0, message_len);
 
-        if (resp_buf[0] == (byte)Message.Bitfield)
-            await stream.WriteAsync(req.AsMemory(0, 5));
-    }
+        if (resp_buf[0] == (byte)Message.Unchoke)
+        {
+            byte[] msg_len_network = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(13));
+            byte[] piece_index_network = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(piece_index));
 
-    // Phase 2: Handle unchoke and send requests
-    int chunk_count = (piece_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    await stream.ReadExactlyAsync(len_buf, 0, 4);
-    message_len = len_buf[0] << 24 | len_buf[1] << 16 | len_buf[2] << 8 | len_buf[3];
-    resp_buf = new byte[message_len];
-    await stream.ReadExactlyAsync(resp_buf, 0, message_len);
+            for (int chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx)
+            {
+                byte[] begin = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(chunk_idx * CHUNK_SIZE));
+                int len_le = Math.Min(CHUNK_SIZE, piece_size - chunk_idx * CHUNK_SIZE);
+                byte[] len = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(len_le));
 
-    if (resp_buf[0] == (byte)Message.Unchoke)
-    {
-        byte[] msg_len_network = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(13));
-        byte[] piece_index_network = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(piece_index));
-
+                await stream.WriteAsync(msg_len_network.AsMemory(0, 4));
+                await stream.WriteAsync([(byte)Message.Request], 0, 1);
+                await stream.WriteAsync(piece_index_network.AsMemory(0, 4));
+                await stream.WriteAsync(begin.AsMemory(0, 4));
+                await stream.WriteAsync(len.AsMemory(0, 4));
+            }
+        }
+        // Phase 3: Download chunks
         for (int chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx)
         {
-            byte[] begin = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(chunk_idx * CHUNK_SIZE));
-            int len_le = Math.Min(CHUNK_SIZE, piece_size - chunk_idx * CHUNK_SIZE);
-            byte[] len = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(len_le));
+            await stream.ReadExactlyAsync(len_buf, 0, 4);
+            message_len = len_buf[0] << 24 | len_buf[1] << 16 | len_buf[2] << 8 | len_buf[3];
+            byte[] info_buf = new byte[9];
+            await stream.ReadExactlyAsync(info_buf, 0, 9);
 
-            await stream.WriteAsync(msg_len_network.AsMemory(0, 4));
-            await stream.WriteAsync([(byte)Message.Request], 0, 1);
-            await stream.WriteAsync(piece_index_network.AsMemory(0, 4));
-            await stream.WriteAsync(begin.AsMemory(0, 4));
-            await stream.WriteAsync(len.AsMemory(0, 4));
+            int byte_offset = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(info_buf.AsSpan()[5..9]));
+            int block_len = message_len - 9;
+            await stream.ReadExactlyAsync(piece_buffer, (int)(buffer_offset + byte_offset), block_len);
         }
-    }
-    // Phase 3: Download chunks
-    for (int chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx)
-    {
-        await stream.ReadExactlyAsync(len_buf, 0, 4);
-        message_len = len_buf[0] << 24 | len_buf[1] << 16 | len_buf[2] << 8 | len_buf[3];
-        byte[] info_buf = new byte[9];
-        await stream.ReadExactlyAsync(info_buf, 0, 9);
 
-        int byte_offset = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(info_buf[5..9]));
-        int block_len = message_len - 9;
-        await stream.ReadExactlyAsync(piece_buffer, (int)(buffer_offset + byte_offset), block_len);
+        return true; // Success
+    }
+    catch (EndOfStreamException)
+    {
+        Console.WriteLine($"Peer disconnected during piece {piece_index} download");
+        return false;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error in piece {piece_index} download: {ex.Message}");
+        return false;
+    }
+}  
+
+async Task<(bool, int)> download_piece(byte[] piece_buffer, string ip, int port, byte[] info_hash_bytes, int piece_size, int piece_index, long buffer_offset = 0, bool magnet = false)
+{
+    try
+    {
+        PeerInfo peer = await handshake(ip, port, info_hash_bytes, extension: magnet);
+        using var stream = peer.stream;
+        return (await download_piece_2(piece_buffer, piece_size, piece_index, stream, buffer_offset, magnet), piece_index);
+    }
+    catch (Exception)
+    {
+        return (false, 0);
     }
 }
-async Task download_piece(byte[] piece_buffer, string ip, int port, byte[] info_hash_bytes, int piece_size, int piece_index, long buffer_offset = 0, bool magnet = false)
-{
-    PeerInfo peer = await handshake(ip, port, info_hash_bytes);
-    using var stream = peer.stream;
-    await download_piece_2(piece_buffer, piece_size, piece_index, stream, buffer_offset, magnet);
-    
-}
+
+
 
 async Task<object> get_magnet_metadata(PeerInfo peer)
 {
@@ -595,7 +711,7 @@ async Task<object> get_magnet_metadata(PeerInfo peer)
 
     byte[] resp_buf = new byte[message_len];
     await peer.stream.ReadExactlyAsync(msg_data, 0, 2); // Message ID and Ext Message ID
-    await peer.stream.ReadExactlyAsync(resp_buf, 0, message_len-2);
+    await peer.stream.ReadExactlyAsync(resp_buf, 0, message_len - 2);
 
     string metadata_str = Encoding.Latin1.GetString(resp_buf);
     Decode(metadata_str, out int offset);
